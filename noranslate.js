@@ -173,11 +173,13 @@
   }
 
   // Deterministic pseudo-random number in [0, 1) from an integer seed.
+  // Uses a multiply-xorshift mixing sequence (finalizer from MurmurHash3 / lowbias32)
+  // to produce a well-distributed value from a single 32-bit seed.
   function seededRand(seed) {
     let s = (seed ^ (seed >>> 16)) >>> 0;
     s = Math.imul(s ^ (s >>> 15), s | 1) >>> 0;
     s = (s ^ (s + Math.imul(s ^ (s >>> 7), s | 61))) >>> 0;
-    return (s ^ (s >>> 14)) >>> 0 / 0x100000000;
+    return ((s ^ (s >>> 14)) >>> 0) / 0x100000000; // divide by 2^32 → [0, 1)
   }
 
   // Simple Markov-chain scramble: next character depends on the previous
@@ -204,9 +206,10 @@
       }
 
       // Combine Markov state, position, word, and text seed for this step.
+      // textSeed is masked to 31 bits so the XOR result stays within safe-integer range.
       const stepSeed =
         Math.abs(hashString(`${langKey}|${wordIndex}|${prevCharCode}|${index}`)) ^
-        (textSeed & 0x7FFFFFFF);
+        (textSeed & 0x7FFFFFFF); // 0x7FFFFFFF = 2^31 − 1 (31-bit mask)
       const rand = seededRand(stepSeed);
 
       let mapped;
