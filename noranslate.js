@@ -163,7 +163,6 @@
     }
   }
 
-  const baseIndexCache = new Map();
   function hashString(value) {
     let hash = 0;
     for (let i = 0; i < value.length; i += 1) {
@@ -173,28 +172,23 @@
     return hash;
   }
 
-  function mapWithJitter(charSet, baseKey, jitterSeed, jitterRange, lastMapped) {
-    let baseIndex = baseIndexCache.get(baseKey);
-    if (baseIndex === undefined) {
-      baseIndex = Math.abs(hashString(baseKey)) % charSet.length;
-      baseIndexCache.set(baseKey, baseIndex);
-    }
-
-    const jitter = Math.abs(hashString(jitterSeed)) % jitterRange;
-    let mappedIndex = (baseIndex + jitter) % charSet.length;
-    let mapped = charSet[mappedIndex];
-
-    if (mapped === lastMapped && charSet.length > 1) {
-      mappedIndex = (mappedIndex + 1) % charSet.length;
-      mapped = charSet[mappedIndex];
-    }
-
-    return mapped;
+  // Deterministic pseudo-random number in [0, 1) from an integer seed.
+  // Uses a multiply-xorshift mixing sequence (finalizer from MurmurHash3 / lowbias32)
+  // to produce a well-distributed value from a single 32-bit seed.
+  function seededRand(seed) {
+    let s = (seed ^ (seed >>> 16)) >>> 0;
+    s = Math.imul(s ^ (s >>> 15), s | 1) >>> 0;
+    s = (s ^ (s + Math.imul(s ^ (s >>> 7), s | 61))) >>> 0;
+    return ((s ^ (s >>> 14)) >>> 0) / 0x100000000; // divide by 2^32 → [0, 1)
   }
 
+  // Simple Markov-chain scramble: next character depends on the previous
+  // mapped character (prevCharCode) plus position, making the output a chain
+  // rather than an independent per-character substitution.
   function scramble(text, charSet, langKey) {
-    const jitterRange = Math.min(128, Math.max(8, Math.floor(charSet.length / 4)));
-    let lastMapped = "";
+    // Text-level seed keeps the whole string's output consistent.
+    const textSeed = Math.abs(hashString(text + langKey));
+    let prevCharCode = 0; // Markov state: code point of last mapped char
     let wordIndex = 0;
     let output = "";
 
@@ -203,7 +197,7 @@
       if (/\s/.test(char)) {
         output += char;
         wordIndex += 1;
-        lastMapped = "";
+        prevCharCode = 0; // reset chain state at word boundary
         continue;
       }
       if (/([.,!?;:！？。、「」()0-9])/.test(char)) {
@@ -211,22 +205,25 @@
         continue;
       }
 
-      const baseKey = `${langKey}|${char}|${wordIndex}`;
-      const jitterSeed = `${baseKey}|${index}`;
-      let activeCharSet = charSet;
-      let mapped;
+      // Combine Markov state, position, word, and text seed for this step.
+      // textSeed is masked to 31 bits so the XOR result stays within safe-integer range.
+      const stepSeed =
+        Math.abs(hashString(`${langKey}|${wordIndex}|${prevCharCode}|${index}`)) ^
+        (textSeed & 0x7FFFFFFF); // 0x7FFFFFFF = 2^31 − 1 (31-bit mask)
+      const rand = seededRand(stepSeed);
 
+      let mapped;
       if (langKey === "en") {
         const lower = char.toLowerCase();
         const isVowel = englishVowels.includes(lower);
-        activeCharSet = isVowel ? englishVowelPool : englishConsonantPool;
-        mapped = mapWithJitter(activeCharSet, baseKey, jitterSeed, jitterRange, lastMapped);
+        const activeCharSet = isVowel ? englishVowelPool : englishConsonantPool;
+        mapped = activeCharSet[Math.floor(rand * activeCharSet.length)];
         if (char !== lower) mapped = mapped.toUpperCase();
       } else {
-        mapped = mapWithJitter(activeCharSet, baseKey, jitterSeed, jitterRange, lastMapped);
+        mapped = charSet[Math.floor(rand * charSet.length)];
       }
 
-      lastMapped = mapped;
+      prevCharCode = mapped.codePointAt(0);
       output += mapped;
     }
 
